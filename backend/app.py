@@ -48,31 +48,54 @@ class UserInterest(db.Model):
 def register_user():
     try :
         data = request.json
+
+         # 사용자 정보
         name = data['name']
         gender = data['gender']
         birth_date = datetime.strptime(data['birth_date'], '%Y-%m-%d')
 
+        # 관심분야 리스트
+        interests = data.get('interests', [])  # 없으면 빈 리스트
+
+        # 사용자 추가
         new_user = User(name=name, gender=gender, birth_date=birth_date)
         db.session.add(new_user)
+        db.session.flush()  # flush()로 user_id를 미리 가져옴
+        user_id = new_user.user_id
+
+        # 관심분야 추가
+        for interest_id in interests:
+            interest = Interest.query.get(interest_id)
+            if not interest:
+                return jsonify({'error': f'interests_id {interest_id}가 존재하지 않습니다.'}), 404
+
+            user_interest = UserInterest(user_id=new_user.user_id, interests_id=interest_id)
+            db.session.add(user_interest)
+
         db.session.commit()
+        # # 사용자 추가
+        # new_user = User(name=name, gender=gender, birth_date=birth_date)
+        # db.session.add(new_user)
+        # db.session.commit()
 
         return jsonify({'message': '회원가입이 완료되었습니다!', 'user_id': new_user.user_id})
     except Exception as e:
+        db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
 
 # 관심분야 추가 API
-@app.route('/add_interest', methods=['POST'])
-def add_interest():
+@app.route('/update_interest', methods=['POST'])
+def update_interest():
     try:
         data = request.json
         user_id = data['user_id']
-        interests = data['interests']  # 관심분야 ID 리스트
+        new_interests = data.get('interests', [])  # 새 관심분야 ID 리스트
 
         # 입력 데이터 검증
-        if not user_id or not interests:
+        if not user_id or not new_interests:
             return jsonify({'error': 'user_id와 interests는 필수 입력값입니다.'}), 400
-        if not isinstance(interests, list) or len(interests) == 0:
+        if not isinstance(new_interests, list) or len(new_interests) == 0:
             return jsonify({'error': 'interests는 비어있을 수 없습니다.'}), 400
 
         # 유효한 user_id인지 확인
@@ -80,8 +103,12 @@ def add_interest():
         if not user:
             return jsonify({'error': f'user_id {user_id}가 존재하지 않습니다.'}), 404
 
-        # 관심 분야 ID가 유효한지 확인
-        for interest_id in interests:
+
+        # 기존 관심분야 삭제
+        UserInterest.query.filter_by(user_id=user_id).delete()
+
+        # 관심 분야 ID가 유효한지 확인 후 추가
+        for interest_id in new_interests:
             interest = Interest.query.get(interest_id)
             if not interest:
                 return jsonify({'error': f'interests_id {interest_id}가 존재하지 않습니다.'}), 404
@@ -94,6 +121,7 @@ def add_interest():
         return jsonify({'message': '관심분야가 추가되었습니다!'}), 201
 
     except Exception as e:
+        db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
 # 로그인 API
