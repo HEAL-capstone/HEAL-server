@@ -23,6 +23,7 @@ services:
       MYSQL_PASSWORD: heal_password
     ports:
       - "3306:3306"
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     volumes:
       - db_data:/var/lib/mysql
       - ./database_init:/docker-entrypoint-initdb.d  # 초기화 스크립트 경로

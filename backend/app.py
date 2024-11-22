@@ -1,16 +1,26 @@
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import text
 from flask_cors import CORS
 from datetime import datetime
+import json
 
 app = Flask(__name__)
 CORS(app)  # CORS 지원 추가
 
 # MySQL 데이터베이스 연결 설정
-app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+pymysql://heal_user:heal_password@db:3306/heal_db'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+pymysql://heal_user:heal_password@db:3306/heal_db?charset=utf8mb4'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
+
+# Flask JSON 인코더 커스터마이징
+class CustomJSONEncoder(json.JSONEncoder):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.ensure_ascii = False  # JSON 응답에서 한글 깨짐 방지
+
+app.json_encoder = CustomJSONEncoder
 
 # 데이터베이스 모델 정의
 class User(db.Model):
@@ -82,7 +92,7 @@ def add_interest():
 
         db.session.commit()
         return jsonify({'message': '관심분야가 추가되었습니다!'}), 201
-        
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -107,8 +117,51 @@ def login_user():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+# 관심분야 조회 API
+@app.route('/user_interests/<int:user_id>', methods=['GET'])
+def get_user_interests(user_id):
+    try:
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'error': f'user_id {user_id}가 존재하지 않습니다.'}), 404
+
+        user_interests = UserInterest.query.filter_by(user_id=user_id).all()
+        if not user_interests:
+            return jsonify({'message': '관심 분야가 없습니다.', 'user_id': user_id, 'interests': []}), 200
+
+        interests_list = []
+        for user_interest in user_interests:
+            interest = Interest.query.get(user_interest.interests_id)
+            if interest:
+                interests_list.append({
+                    'interests_id': interest.interests_id,
+                    'category': interest.category
+                })
+
+        # 디버깅: 직렬화 전 데이터 출력
+        print({'user_id': user_id, 'interests': interests_list})
+
+        return jsonify({'user_id': user_id, 'interests': interests_list}), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 
 if __name__ == '__main__':
     with app.app_context():
+         # MySQL 세션에 utf8mb4 설정 적용
+        db.session.execute(text("SET NAMES 'utf8mb4'"))
+        db.session.execute(text("SET character_set_connection = 'utf8mb4'"))
+        db.session.execute(text("SET character_set_results = 'utf8mb4'"))
+        db.session.execute(text("SET character_set_client = 'utf8mb4'"))
+        db.session.commit()
+
+        # MySQL 문자셋 설정 확인
+        print("MySQL 세션의 문자셋 설정:")
+        result = db.session.execute(text("SHOW VARIABLES LIKE 'character_set%'")).fetchall()
+        for row in result:
+            print(row)
+
+        
         db.create_all()  # 초기 테이블 생성
     app.run(host='0.0.0.0', port=5000)
