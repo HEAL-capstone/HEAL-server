@@ -12,7 +12,7 @@ from flask_migrate import Migrate
 
 
 app = Flask(__name__)
-CORS(app)  # CORS 지원 추가
+CORS(app, supports_credentials=True, origins=['http://localhost:3000'])  # CORS 지원 추가
 
 # 시크릿 키 설정 (실제 환경에서는 안전하게 관리되어야 합니다)
 app.config['SECRET_KEY'] = 'your_secret_key'
@@ -66,9 +66,12 @@ def token_required(f):
     def decorated(*args, **kwargs):
         token = None
 
-        # 헤더에서 토큰 가져오기
-        if 'Authorization' in request.headers:
-            token = request.headers['Authorization'].split(" ")[1]  # "Bearer <token>"
+        # 쿠키에서 토큰 가져오기
+        token = request.cookies.get('token')
+
+        # # 헤더에서 토큰 가져오기
+        # if 'Authorization' in request.headers:
+        #     token = request.headers['Authorization'].split(" ")[1]  # "Bearer <token>"
 
         if not token:
             return jsonify({'error': '토큰이 제공되지 않았습니다.'}), 401
@@ -162,7 +165,21 @@ def login_user():
             'exp': datetime.utcnow() + app.config['TOKEN_EXPIRATION']
         }, app.config['SECRET_KEY'], algorithm="HS256")
 
-        return jsonify({'message': '로그인 성공', 'token': token}), 200
+
+        # 응답 생성
+        response = jsonify({'message': '로그인 성공'})
+        # 쿠키에 토큰 저장
+        response.set_cookie(
+            'token',  # 쿠키 이름
+            token,    # 쿠키 값
+            httponly=True,
+            secure=False,  # HTTPS 환경에서는 True로 설정
+            samesite='Lax',  # CSRF 방지를 위해 설정
+            max_age=app.config['TOKEN_EXPIRATION'].total_seconds()
+        )
+
+        return response, 200
+        # return jsonify({'message': '로그인 성공', 'token': token}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -171,8 +188,13 @@ def login_user():
 @token_required
 def logout_user():
     try:
-        # 서버 측에서 특별한 처리를 하지 않음
-        return jsonify({'message': '로그아웃 되었습니다.'}), 200
+        # 응답 생성
+        response = jsonify({'message': '로그아웃 되었습니다.'})
+        # 쿠키 삭제 (만료 시간 과거로 설정)
+        response.set_cookie('token', '', expires=0)
+        return response, 200
+        # # 서버 측에서 특별한 처리를 하지 않음
+        # return jsonify({'message': '로그아웃 되었습니다.'}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
