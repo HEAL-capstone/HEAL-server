@@ -6,7 +6,7 @@ services:
       context: ./backend
     container_name: backend
     ports:
-      - "6000:6000"
+      - "8000:8000"
     depends_on:
       - db
     environment:
