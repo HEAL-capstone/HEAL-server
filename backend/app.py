@@ -357,4 +357,4 @@ if __name__ == '__main__':
 
         
         db.create_all()  # 초기 테이블 생성
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=6000)
