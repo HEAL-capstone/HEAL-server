@@ -2,8 +2,11 @@
 CREATE DATABASE IF NOT EXISTS heal_db;
 
 -- user 테이블 생성
+DROP TABLE IF EXISTS user; 
 CREATE TABLE IF NOT EXISTS user (
     user_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(50) NOT NULL UNIQUE,  -- 추가
+    password VARCHAR(255) NOT NULL,
     name VARCHAR(20) NOT NULL,
     gender ENUM('male', 'female') NOT NULL,
     birth_date DATE NOT NULL,
