@@ -1,12 +1,23 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, g
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import text
 from flask_cors import CORS
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
+from flask_bcrypt import Bcrypt  # 추가
+import jwt
+from functools import wraps
+
+
 
 app = Flask(__name__)
 CORS(app)  # CORS 지원 추가
+
+# 시크릿 키 설정 (실제 환경에서는 안전하게 관리되어야 합니다)
+app.config['SECRET_KEY'] = 'your_secret_key'
+
+# 토큰 만료 시간 설정
+app.config['TOKEN_EXPIRATION'] = timedelta(hours=1)
 
 # MySQL 데이터베이스 연결 설정
 app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+pymysql://heal_user:heal_password@db:3306/heal_db?charset=utf8mb4'
@@ -26,6 +37,8 @@ app.json_encoder = CustomJSONEncoder
 class User(db.Model):
     __tablename__ = 'user'
     user_id = db.Column(db.BigInteger, primary_key=True, autoincrement=True)
+    username = db.Column(db.String(50), unique=True, nullable=False)  # 추가: 유저네임 필드
+    password = db.Column(db.String(255), nullable=False)  # 추가: 비밀번호 해싱된 값 저장
     name = db.Column(db.String(20), nullable=False)
     gender = db.Column(db.Enum('male', 'female'), nullable=False)
     birth_date = db.Column(db.Date, nullable=False)
@@ -43,25 +56,67 @@ class UserInterest(db.Model):
     user_id = db.Column(db.BigInteger, db.ForeignKey('user.user_id'), nullable=False)
     interests_id = db.Column(db.BigInteger, db.ForeignKey('interests.interests_id'), nullable=False)
 
+# 인증 데코레이터
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = None
+
+        # 헤더에서 토큰 가져오기
+        if 'Authorization' in request.headers:
+            token = request.headers['Authorization'].split(" ")[1]  # "Bearer <token>"
+
+        if not token:
+            return jsonify({'error': '토큰이 제공되지 않았습니다.'}), 401
+
+        try:
+            data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
+            current_user = User.query.get(data['user_id'])
+            if not current_user:
+                return jsonify({'error': '사용자를 찾을 수 없습니다.'}), 401
+            g.user = current_user  # 글로벌 컨텍스트에 사용자 저장
+        except jwt.ExpiredSignatureError:
+            return jsonify({'error': '토큰이 만료되었습니다.'}), 401
+        except Exception as e:
+            return jsonify({'error': '유효하지 않은 토큰입니다.'}), 401
+
+        return f(*args, **kwargs)
+    return decorated
+
 # 회원가입 API
-@app.route('/register', methods=['POST'])
+@app.route('/users', methods=['POST'])
 def register_user():
     try :
         data = request.json
 
          # 사용자 정보
+        username = data['username']
+        password = data['password']
         name = data['name']
         gender = data['gender']
         birth_date = datetime.strptime(data['birth_date'], '%Y-%m-%d')
 
-        # 관심분야 리스트
-        interests = data.get('interests', [])  # 없으면 빈 리스트
-
+        # 사용자명 중복 확인
+        if User.query.filter_by(username=username).first():
+            return jsonify({'error': '이미 존재하는 사용자명입니다.'}), 400
+        
+        # 비밀번호 해싱
+        hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+        
         # 사용자 추가
-        new_user = User(name=name, gender=gender, birth_date=birth_date)
+        new_user = User(
+            username=username,
+            password=hashed_password.decode('utf-8'),
+            name=name,
+            gender=gender,
+            birth_date=birth_date
+        )
         db.session.add(new_user)
         db.session.flush()  # flush()로 user_id를 미리 가져옴
         user_id = new_user.user_id
+
+        # 관심분야 리스트
+        interests = data.get('interests', [])  # 없으면 빈 리스트
 
         # 관심분야 추가
         for interest_id in interests:
@@ -73,15 +128,123 @@ def register_user():
             db.session.add(user_interest)
 
         db.session.commit()
-        # # 사용자 추가
-        # new_user = User(name=name, gender=gender, birth_date=birth_date)
-        # db.session.add(new_user)
-        # db.session.commit()
-
+    
         return jsonify({'message': '회원가입이 완료되었습니다!', 'user_id': new_user.user_id})
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
+
+
+# 로그인 API
+@app.route('/auth/login', methods=['POST'])
+def login_user():
+    try:
+        data = request.json
+        username = data['username']
+        password = data['password']
+
+        # 간단한 인증 로직 추가 (비밀번호 해싱 필요 시 Hash 적용)
+        user = User.query.filter_by(name=username).first()
+        if user is None:
+            return jsonify({'error': '존재하지 않는 사용자입니다.'}), 404
+
+       # 비밀번호 확인
+        if not bcrypt.checkpw(password.encode('utf-8'), user.password.encode('utf-8')):
+            return jsonify({'error': '비밀번호가 올바르지 않습니다.'}), 401
+
+        # JWT 토큰 생성
+        token = jwt.encode({
+            'user_id': user.user_id,
+            'exp': datetime.utcnow() + app.config['TOKEN_EXPIRATION']
+        }, app.config['SECRET_KEY'], algorithm="HS256")
+
+        return jsonify({'message': '로그인 성공', 'token': token}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# 로그아웃 API (클라이언트 측에서 토큰을 삭제하면 되므로 서버에서는 특별한 처리가 필요하지 않을 수 있음)
+@app.route('/auth/logout', methods=['DELETE'])
+@token_required
+def logout_user():
+    try:
+        # 서버 측에서 특별한 처리를 하지 않음
+        return jsonify({'message': '로그아웃 되었습니다.'}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+
+
+# 현재 사용자 정보 조회 API
+@app.route('/users/me', methods=['GET'])
+@token_required
+def get_current_user():
+    try:
+        user = g.user
+        user_data = {
+            'user_id': user.user_id,
+            'username': user.username,
+            'name': user.name,
+            'gender': user.gender,
+            'birth_date': user.birth_date.strftime('%Y-%m-%d'),
+            'created_date': user.created_date.strftime('%Y-%m-%d %H:%M:%S'),
+            'modified_date': user.modified_date.strftime('%Y-%m-%d %H:%M:%S')
+        }
+        return jsonify(user_data), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# 현재 사용자 정보 수정 API
+@app.route('/users/me', methods=['PUT'])
+@token_required
+def update_current_user():
+    try:
+        data = request.json
+        user = g.user
+
+        # 업데이트 가능한 필드
+        user.name = data.get('name', user.name)
+        user.gender = data.get('gender', user.gender)
+        birth_date = data.get('birth_date')
+        if birth_date:
+            user.birth_date = datetime.strptime(birth_date, '%Y-%m-%d')
+
+        db.session.commit()
+
+        return jsonify({'message': '사용자 정보가 업데이트되었습니다.'}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+
+# 비밀번호 변경 API
+@app.route('/users/me/password', methods=['PUT'])
+@token_required
+def change_password():
+    try:
+        data = request.json
+        user = g.user
+
+        current_password = data['current_password']
+        new_password = data['new_password']
+
+        # 현재 비밀번호 확인
+        if not bcrypt.checkpw(current_password.encode('utf-8'), user.password.encode('utf-8')):
+            return jsonify({'error': '현재 비밀번호가 올바르지 않습니다.'}), 401
+
+        # 새로운 비밀번호 해싱 및 저장
+        hashed_password = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
+        user.password = hashed_password.decode('utf-8')
+
+        db.session.commit()
+
+        return jsonify({'message': '비밀번호가 변경되었습니다.'}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
 
 
 # 관심분야 추가 API
@@ -124,26 +287,7 @@ def update_interest():
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
-# 로그인 API
-@app.route('/login', methods=['POST'])
-def login_user():
-    try:
-        data = request.json
-        username = data['username']
-        password = data['password']
 
-        # 간단한 인증 로직 추가 (비밀번호 해싱 필요 시 Hash 적용)
-        user = User.query.filter_by(name=username).first()
-        if user is None:
-            return jsonify({'error': '존재하지 않는 사용자입니다.'}), 404
-
-        # 비밀번호 비교 로직 (현재는 단순 비교)
-        if password != 'testpassword':  # 실제로는 해시 비교가 필요
-            return jsonify({'error': '비밀번호가 올바르지 않습니다.'}), 401
-
-        return jsonify({'message': '로그인 성공', 'user_id': user.user_id}), 200
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
 
 # 관심분야 조회 API
 @app.route('/user_interests/<int:user_id>', methods=['GET'])
