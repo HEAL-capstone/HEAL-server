@@ -4,9 +4,10 @@ from sqlalchemy import text
 from flask_cors import CORS
 from datetime import datetime, timedelta
 import json
-from flask_bcrypt import Bcrypt  # 추가
 import jwt
 from functools import wraps
+from flask_bcrypt import Bcrypt
+from flask_migrate import Migrate
 
 
 
@@ -24,6 +25,9 @@ app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+pymysql://heal_user:heal_password
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
+bcrypt = Bcrypt(app)
+migrate = Migrate(app, db)
+
 
 # Flask JSON 인코더 커스터마이징
 class CustomJSONEncoder(json.JSONEncoder):
@@ -101,7 +105,7 @@ def register_user():
             return jsonify({'error': '이미 존재하는 사용자명입니다.'}), 400
         
         # 비밀번호 해싱
-        hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+        hashed_password = bcrypt.generate_password_hash(password)
         
         # 사용자 추가
         new_user = User(
@@ -144,12 +148,12 @@ def login_user():
         password = data['password']
 
         # 간단한 인증 로직 추가 (비밀번호 해싱 필요 시 Hash 적용)
-        user = User.query.filter_by(name=username).first()
+        user = User.query.filter_by(username=username).first()
         if user is None:
             return jsonify({'error': '존재하지 않는 사용자입니다.'}), 404
 
        # 비밀번호 확인
-        if not bcrypt.checkpw(password.encode('utf-8'), user.password.encode('utf-8')):
+        if not bcrypt.check_password_hash(user.password, password):
             return jsonify({'error': '비밀번호가 올바르지 않습니다.'}), 401
 
         # JWT 토큰 생성
@@ -231,12 +235,12 @@ def change_password():
         new_password = data['new_password']
 
         # 현재 비밀번호 확인
-        if not bcrypt.checkpw(current_password.encode('utf-8'), user.password.encode('utf-8')):
+        if not bcrypt.check_password_hash(user.password, current_password):
             return jsonify({'error': '현재 비밀번호가 올바르지 않습니다.'}), 401
 
         # 새로운 비밀번호 해싱 및 저장
-        hashed_password = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
-        user.password = hashed_password.decode('utf-8')
+        hashed_password = bcrypt.generate_password_hash(new_password)
+        user.password = hashed_password
 
         db.session.commit()
 
@@ -247,59 +251,24 @@ def change_password():
 
 
 
-# 관심분야 추가 API
-@app.route('/update_interest', methods=['POST'])
-def update_interest():
+# 관심분야 목록 조회 API
+@app.route('/interests', methods=['GET'])
+def get_all_interests():
     try:
-        data = request.json
-        user_id = data['user_id']
-        new_interests = data.get('interests', [])  # 새 관심분야 ID 리스트
-
-        # 입력 데이터 검증
-        if not user_id or not new_interests:
-            return jsonify({'error': 'user_id와 interests는 필수 입력값입니다.'}), 400
-        if not isinstance(new_interests, list) or len(new_interests) == 0:
-            return jsonify({'error': 'interests는 비어있을 수 없습니다.'}), 400
-
-        # 유효한 user_id인지 확인
-        user = User.query.get(user_id)
-        if not user:
-            return jsonify({'error': f'user_id {user_id}가 존재하지 않습니다.'}), 404
-
-
-        # 기존 관심분야 삭제
-        UserInterest.query.filter_by(user_id=user_id).delete()
-
-        # 관심 분야 ID가 유효한지 확인 후 추가
-        for interest_id in new_interests:
-            interest = Interest.query.get(interest_id)
-            if not interest:
-                return jsonify({'error': f'interests_id {interest_id}가 존재하지 않습니다.'}), 404
-
-            # 관심분야 추가
-            user_interest = UserInterest(user_id=user_id, interests_id=interest_id)
-            db.session.add(user_interest)
-
-        db.session.commit()
-        return jsonify({'message': '관심분야가 추가되었습니다!'}), 201
-
+        interests = Interest.query.all()
+        interests_list = [{'interests_id': i.interests_id, 'category': i.category} for i in interests]
+        return jsonify({'interests': interests_list}), 200
     except Exception as e:
-        db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
 
-
-# 관심분야 조회 API
-@app.route('/user_interests/<int:user_id>', methods=['GET'])
-def get_user_interests(user_id):
+# 현재 사용자의 관심분야 조회 API
+@app.route('/users/me/interests', methods=['GET'])
+@token_required
+def get_user_interests():
     try:
-        user = User.query.get(user_id)
-        if not user:
-            return jsonify({'error': f'user_id {user_id}가 존재하지 않습니다.'}), 404
-
-        user_interests = UserInterest.query.filter_by(user_id=user_id).all()
-        if not user_interests:
-            return jsonify({'message': '관심 분야가 없습니다.', 'user_id': user_id, 'interests': []}), 200
+        user = g.user
+        user_interests = UserInterest.query.filter_by(user_id=user.user_id).all()
 
         interests_list = []
         for user_interest in user_interests:
@@ -310,13 +279,65 @@ def get_user_interests(user_id):
                     'category': interest.category
                 })
 
-        # 디버깅: 직렬화 전 데이터 출력
-        print({'user_id': user_id, 'interests': interests_list})
-
-        return jsonify({'user_id': user_id, 'interests': interests_list}), 200
-
+        return jsonify({'user_id': user.user_id, 'interests': interests_list}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+# 관심분야 추가 API
+@app.route('/users/me/interests', methods=['POST'])
+@token_required
+def add_user_interests():
+    try:
+        data = request.json
+        user = g.user
+        new_interests = data.get('interests', [])  # 새 관심분야 ID 리스트
+
+        # 입력 데이터 검증
+        if not new_interests:
+            return jsonify({'error': 'interests는 비어있을 수 없습니다.'}), 400
+        if not isinstance(new_interests, list):
+            return jsonify({'error': 'interests는 리스트여야 합니다.'}), 400
+
+        # 기존 관심분야 삭제
+        UserInterest.query.filter_by(user_id=user.user_id).delete()
+
+        # 관심 분야 ID가 유효한지 확인 후 추가
+        for interest_id in new_interests:
+            interest = Interest.query.get(interest_id)
+            if not interest:
+                return jsonify({'error': f'interests_id {interest_id}가 존재하지 않습니다.'}), 404
+
+            # 관심분야 추가
+            user_interest = UserInterest(user_id=user.user_id, interests_id=interest_id)
+            db.session.add(user_interest)
+
+        db.session.commit()
+        return jsonify({'message': '관심분야가 업데이트되었습니다!'}), 201
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+# 관심분야 삭제 API
+@app.route('/users/me/interests/<int:interest_id>', methods=['DELETE'])
+@token_required
+def delete_user_interest(interest_id):
+    try:
+        user = g.user
+
+        user_interest = UserInterest.query.filter_by(user_id=user.user_id, interests_id=interest_id).first()
+        if not user_interest:
+            return jsonify({'error': '해당 관심분야가 존재하지 않습니다.'}), 404
+
+        db.session.delete(user_interest)
+        db.session.commit()
+        return jsonify({'message': '관심분야가 삭제되었습니다.'}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
 
 
 if __name__ == '__main__':
