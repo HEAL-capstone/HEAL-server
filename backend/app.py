@@ -172,7 +172,7 @@ def login_user():
         response.set_cookie(
             'token',  # 쿠키 이름
             token,    # 쿠키 값
-            httponly=True,
+            httponly=False,
             secure=False,  # HTTPS 환경에서는 True로 설정
             samesite='Lax',  # CSRF 방지를 위해 설정
             max_age=app.config['TOKEN_EXPIRATION'].total_seconds()
