@@ -360,6 +360,27 @@ def delete_user_interest(interest_id):
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
+# 회원 탈퇴 API
+@app.route('/users/me', methods=['DELETE'])
+@token_required
+def delete_current_user():
+    try:
+        user = g.user
+
+        # 연관 데이터 삭제 (예: user_interests)
+        UserInterest.query.filter_by(user_id=user.user_id).delete()
+
+        # 사용자 계정 삭제
+        db.session.delete(user)
+        db.session.commit()
+
+        # 응답 생성 및 쿠키 삭제
+        response = jsonify({'message': '회원 탈퇴가 완료되었습니다.'})
+        response.set_cookie('token', '', expires=0)  # 토큰 쿠키 제거
+        return response, 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
 
 
 if __name__ == '__main__':
