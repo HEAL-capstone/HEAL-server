@@ -10,6 +10,7 @@ from flask_bcrypt import Bcrypt
 from flask_migrate import Migrate
 import logging
 from logstash_formatter import LogstashFormatterV1
+import logstash 
 
 
 app = Flask(__name__)
@@ -42,33 +43,84 @@ app.json_encoder = CustomJSONEncoder
 logger = logging.getLogger('flask_app')
 logger.setLevel(logging.INFO)
 
-# Logstash Formatter 핸들러 추가
-logstash_handler = logging.StreamHandler()  # 로그를 스트림(표준 출력)으로 출력
-logstash_handler.setFormatter(LogstashFormatterV1())  # LogstashFormatterV1 사용
-logger.addHandler(logstash_handler)
+# Logstash 핸들러 수정된 포맷터 클래스 정의
+class FixedLogstashFormatterV1(LogstashFormatterV1):
+    def format(self, record):
+        message = super().format(record)
+        if isinstance(message, str):  # bytes를 str로 변환
+            return message.encode('utf-8')
+        return message
+
+# Logstash Formatter 핸들러 추가(stdout 출력용)
+stream_handler = logging.StreamHandler()  # 로그를 스트림(표준 출력)으로 출력
+stream_handler.setFormatter(LogstashFormatterV1())  # LogstashFormatterV1 사용
+stream_handler.setLevel(logging.INFO)  # 로그 레벨 설정
+logger.addHandler(stream_handler)
+
+# Logstash 핸들러 추가
+# logstash_host = app.config.get('LOGSTASH_HOST', 'logstash')
+# logstash_port = int(app.config.get('LOGSTASH_PORT', 5044))
+
+logstash_host = 'localhost'  # 또는 Logstash 서버의 IP 주소
+logstash_port = 5044
+
+try:
+    logstash_handler = logstash.TCPLogstashHandler(logstash_host, logstash_port, version=1)
+    logstash_handler.setFormatter(FixedLogstashFormatterV1())
+    logstash_handler.setLevel(logging.INFO)  # 로그 레벨 설정
+
+    # 중복 방지를 위해 기존 핸들러 제거
+    logger.handlers = [h for h in logger.handlers if not isinstance(h, logstash.TCPLogstashHandler)]
+    logger.addHandler(logstash_handler)
+
+    # Logstash 핸들러 초기화 확인 로그
+    logger.info("Flask app started with Logstash handler")
+    logger.debug(f"Logstash handler initialized with host={logstash_host}, port={logstash_port}")
+
+except Exception as e:
+    logger.error(f"Failed to initialize Logstash handler: {e}")
+
+# Werkzeug Logger 수정
+flask_logger = logging.getLogger('werkzeug')
+flask_logger.handlers = [h for h in flask_logger.handlers if not isinstance(h, logstash.TCPLogstashHandler)]
+flask_logger.addHandler(stream_handler)  # stdout만 기록
+flask_logger.setLevel(logging.INFO)
+
+# # Flask의 기본 로거에도 Logstash 핸들러 추가
+# flask_logger = logging.getLogger('werkzeug')
+# flask_logger.addHandler(logstash_handler)
+# flask_logger.setLevel(logging.INFO)
+
+
+# logstash_handler = logstash.TCPLogstashHandler(logstash_host, logstash_port, version=1)
+# logstash_handler.setFormatter(LogstashFormatterV1())
+# logger.addHandler(logstash_handler)
+
 
 # # Logstash 핸들러 추가
 # logstash_host = app.config.get('LOGSTASH_HOST', 'logstash')
 # logstash_port = int(app.config.get('LOGSTASH_PORT', 5044))
 # logger.addHandler(logstash.TCPLogstashHandler(logstash_host, logstash_port, version=1))
 
-# JSON 형식으로 로그를 포맷하기 위한 핸들러 설정
-class JsonFormatter(logging.Formatter):
-    def format(self, record):
-        log_record = {
-            'message': record.getMessage(),
-            'level': record.levelname,
-            'timestamp': self.formatTime(record, self.datefmt),
-            'name': record.name,
-            'pathname': record.pathname,
-            'lineno': record.lineno,
-            'funcName': record.funcName,
-        }
-        return json.dumps(log_record)
 
-json_formatter = JsonFormatter()
-for handler in logger.handlers:
-    handler.setFormatter(json_formatter)
+
+# # JSON 형식으로 로그를 포맷하기 위한 핸들러 설정
+# class JsonFormatter(logging.Formatter):
+#     def format(self, record):
+#         log_record = {
+#             'message': record.getMessage(),
+#             'level': record.levelname,
+#             'timestamp': self.formatTime(record, self.datefmt),
+#             'name': record.name,
+#             'pathname': record.pathname,
+#             'lineno': record.lineno,
+#             'funcName': record.funcName,
+#         }
+#         return json.dumps(log_record)
+
+# json_formatter = JsonFormatter()
+# for handler in logger.handlers:
+#     handler.setFormatter(json_formatter)
 
 
 # 데이터베이스 모델 정의
@@ -127,6 +179,26 @@ def token_required(f):
 
         return f(*args, **kwargs)
     return decorated
+
+
+# @app.route('/test-log', methods=['GET'])
+# def test_log():
+#     record = logging.LogRecord(
+#         name="test_log",
+#         level=logging.INFO,
+#         pathname=__file__,
+#         lineno=0,
+#         msg="Direct log to Logstash",
+#         args=None,
+#         exc_info=None,
+#     )
+#     logstash_handler.emit(record)  # Logstash 핸들러 직접 호출
+#     return jsonify({"message": "Test log sent"}), 200
+
+@app.route('/test-log', methods=['GET'])
+def test_log():
+    logger.info("This is a test log message from Flask")
+    return jsonify({"message": "Test log sent"}), 200
 
 # 회원가입 API
 @app.route('/users', methods=['POST'])
@@ -468,4 +540,32 @@ if __name__ == '__main__':
 
         
         db.create_all()  # 초기 테이블 생성
+
+        # 로깅 설정 디버깅 추가
+        print("Configured log handlers for flask_app logger:")
+        for handler in logger.handlers:
+            print(f"Handler: {handler}, Level: {handler.level}")
+
+        print("\nWerkzeug log handlers:")
+        werkzeug_logger = logging.getLogger('werkzeug')
+        for handler in werkzeug_logger.handlers:
+            print(f"Handler: {handler}, Level: {handler.level}")
+
+        # # Logstash 핸들러 직접 호출 테스트
+        # print("\nTesting direct Logstash handler:")
+        # try:
+        #     record = logging.LogRecord(
+        #         name="test_log",
+        #         level=logging.INFO,
+        #         pathname=__file__,
+        #         lineno=0,
+        #         msg="Direct log to Logstash during startup",
+        #         args=None,
+        #         exc_info=None,
+        #     )
+        #     logstash_handler.emit(record)
+        #     print("Logstash handler test succeeded.")
+        # except Exception as e:
+        #     print(f"Logstash handler test failed: {e}")
+
     app.run(host='0.0.0.0', port=8000)
