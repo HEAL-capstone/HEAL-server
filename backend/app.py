@@ -8,7 +8,8 @@ import jwt
 from functools import wraps
 from flask_bcrypt import Bcrypt
 from flask_migrate import Migrate
-
+import logging
+from logstash_formatter import LogstashFormatterV1
 
 
 app = Flask(__name__)
@@ -36,6 +37,39 @@ class CustomJSONEncoder(json.JSONEncoder):
         self.ensure_ascii = False  # JSON 응답에서 한글 깨짐 방지
 
 app.json_encoder = CustomJSONEncoder
+
+# 로깅 설정
+logger = logging.getLogger('flask_app')
+logger.setLevel(logging.INFO)
+
+# Logstash Formatter 핸들러 추가
+logstash_handler = logging.StreamHandler()  # 로그를 스트림(표준 출력)으로 출력
+logstash_handler.setFormatter(LogstashFormatterV1())  # LogstashFormatterV1 사용
+logger.addHandler(logstash_handler)
+
+# # Logstash 핸들러 추가
+# logstash_host = app.config.get('LOGSTASH_HOST', 'logstash')
+# logstash_port = int(app.config.get('LOGSTASH_PORT', 5044))
+# logger.addHandler(logstash.TCPLogstashHandler(logstash_host, logstash_port, version=1))
+
+# JSON 형식으로 로그를 포맷하기 위한 핸들러 설정
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        log_record = {
+            'message': record.getMessage(),
+            'level': record.levelname,
+            'timestamp': self.formatTime(record, self.datefmt),
+            'name': record.name,
+            'pathname': record.pathname,
+            'lineno': record.lineno,
+            'funcName': record.funcName,
+        }
+        return json.dumps(log_record)
+
+json_formatter = JsonFormatter()
+for handler in logger.handlers:
+    handler.setFormatter(json_formatter)
+
 
 # 데이터베이스 모델 정의
 class User(db.Model):
@@ -74,17 +108,21 @@ def token_required(f):
         #     token = request.headers['Authorization'].split(" ")[1]  # "Bearer <token>"
 
         if not token:
+            logger.warning('토큰이 제공되지 않았습니다.')
             return jsonify({'error': '토큰이 제공되지 않았습니다.'}), 401
 
         try:
             data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
             current_user = User.query.get(data['user_id'])
             if not current_user:
+                logger.warning('사용자를 찾을 수 없습니다.', extra={'user_id': data.get('user_id')})
                 return jsonify({'error': '사용자를 찾을 수 없습니다.'}), 401
             g.user = current_user  # 글로벌 컨텍스트에 사용자 저장
         except jwt.ExpiredSignatureError:
+            logger.warning('토큰이 만료되었습니다.', extra={'user_id': data.get('user_id') if 'data' in locals() else 'unknown'})
             return jsonify({'error': '토큰이 만료되었습니다.'}), 401
         except Exception as e:
+            logger.error(f'유효하지 않은 토큰입니다: {e}')
             return jsonify({'error': '유효하지 않은 토큰입니다.'}), 401
 
         return f(*args, **kwargs)
@@ -105,6 +143,7 @@ def register_user():
 
         # 사용자명 중복 확인
         if User.query.filter_by(username=username).first():
+            logger.warning('회원가입 실패: 이미 존재하는 사용자명.', extra={'username': username})
             return jsonify({'error': '이미 존재하는 사용자명입니다.'}), 400
         
         # 비밀번호 해싱
@@ -129,16 +168,19 @@ def register_user():
         for interest_id in interests:
             interest = Interest.query.get(interest_id)
             if not interest:
+                logger.warning('관심분야 추가 실패: 유효하지 않은 interest_id.', extra={'interest_id': interest_id})
                 return jsonify({'error': f'interests_id {interest_id}가 존재하지 않습니다.'}), 404
 
             user_interest = UserInterest(user_id=new_user.user_id, interests_id=interest_id)
             db.session.add(user_interest)
 
         db.session.commit()
-    
+
+        logger.info('회원가입 성공', extra={'user_id': user_id, 'username': username})
         return jsonify({'message': '회원가입이 완료되었습니다!', 'user_id': new_user.user_id})
     except Exception as e:
         db.session.rollback()
+        logger.error(f'회원가입 중 오류 발생: {e}', extra={'username': data.get('username') if 'data' in locals() else 'unknown'})
         return jsonify({'error': str(e)}), 500
 
 
@@ -153,10 +195,12 @@ def login_user():
         # 간단한 인증 로직 추가 (비밀번호 해싱 필요 시 Hash 적용)
         user = User.query.filter_by(username=username).first()
         if user is None:
+            logger.warning('로그인 실패: 존재하지 않는 사용자.', extra={'username': username})
             return jsonify({'error': '존재하지 않는 사용자입니다.'}), 404
 
        # 비밀번호 확인
         if not bcrypt.check_password_hash(user.password, password):
+            logger.warning('로그인 실패: 비밀번호 불일치.', extra={'username': username})
             return jsonify({'error': '비밀번호가 올바르지 않습니다.'}), 401
 
         # JWT 토큰 생성
@@ -177,10 +221,11 @@ def login_user():
             samesite='Lax',  # CSRF 방지를 위해 설정
             max_age=app.config['TOKEN_EXPIRATION'].total_seconds()
         )
-
+        logger.info('로그인 성공', extra={'username': username, 'user_id': user.user_id})
         return response, 200
         # return jsonify({'message': '로그인 성공', 'token': token}), 200
     except Exception as e:
+        logger.error(f'로그인 중 오류 발생: {e}', extra={'username': username if 'username' in locals() else 'unknown'})
         return jsonify({'error': str(e)}), 500
 
 # 로그아웃 API (클라이언트 측에서 토큰을 삭제하면 되므로 서버에서는 특별한 처리가 필요하지 않을 수 있음)
@@ -196,6 +241,7 @@ def logout_user():
         # # 서버 측에서 특별한 처리를 하지 않음
         # return jsonify({'message': '로그아웃 되었습니다.'}), 200
     except Exception as e:
+        logger.error(f'로그아웃 중 오류 발생: {e}', extra={'user_id': g.user.user_id if 'g.user' in locals() else 'unknown'})
         return jsonify({'error': str(e)}), 500
 
 
@@ -216,8 +262,10 @@ def get_current_user():
             'created_date': user.created_date.strftime('%Y-%m-%d %H:%M:%S'),
             'modified_date': user.modified_date.strftime('%Y-%m-%d %H:%M:%S')
         }
+        logger.info('현재 사용자 정보 조회', extra={'user_id': user.user_id, 'username': user.username})
         return jsonify(user_data), 200
     except Exception as e:
+        logger.error(f'현재 사용자 정보 조회 중 오류 발생: {e}', extra={'user_id': g.user.user_id if 'g.user' in locals() else 'unknown'})
         return jsonify({'error': str(e)}), 500
 
 
@@ -238,9 +286,11 @@ def update_current_user():
 
         db.session.commit()
 
+        logger.info('현재 사용자 정보 수정', extra={'user_id': user.user_id, 'username': user.username})
         return jsonify({'message': '사용자 정보가 업데이트되었습니다.'}), 200
     except Exception as e:
         db.session.rollback()
+        logger.error(f'현재 사용자 정보 수정 중 오류 발생: {e}', extra={'user_id': user.user_id, 'username': user.username})
         return jsonify({'error': str(e)}), 500
 
 
@@ -258,6 +308,7 @@ def change_password():
 
         # 현재 비밀번호 확인
         if not bcrypt.check_password_hash(user.password, current_password):
+            logger.warning('비밀번호 변경 실패: 현재 비밀번호 불일치.', extra={'user_id': user.user_id, 'username': user.username})
             return jsonify({'error': '현재 비밀번호가 올바르지 않습니다.'}), 401
 
         # 새로운 비밀번호 해싱 및 저장
@@ -266,9 +317,11 @@ def change_password():
 
         db.session.commit()
 
+        logger.info('비밀번호 변경 성공', extra={'user_id': user.user_id, 'username': user.username})
         return jsonify({'message': '비밀번호가 변경되었습니다.'}), 200
     except Exception as e:
         db.session.rollback()
+        logger.error(f'비밀번호 변경 중 오류 발생: {e}', extra={'user_id': user.user_id, 'username': user.username})
         return jsonify({'error': str(e)}), 500
 
 
@@ -279,8 +332,10 @@ def get_all_interests():
     try:
         interests = Interest.query.all()
         interests_list = [{'interests_id': i.interests_id, 'category': i.category} for i in interests]
+        logger.info('관심분야 목록 조회')
         return jsonify({'interests': interests_list}), 200
     except Exception as e:
+        logger.error(f'관심분야 목록 조회 중 오류 발생: {e}')
         return jsonify({'error': str(e)}), 500
 
 
@@ -301,8 +356,10 @@ def get_user_interests():
                     'category': interest.category
                 })
 
+        logger.info('현재 사용자 관심분야 조회', extra={'user_id': user.user_id, 'username': user.username})
         return jsonify({'user_id': user.user_id, 'interests': interests_list}), 200
     except Exception as e:
+        logger.error(f'현재 사용자 관심분야 조회 중 오류 발생: {e}', extra={'user_id': user.user_id, 'username': user.username})
         return jsonify({'error': str(e)}), 500
 
 
@@ -317,8 +374,10 @@ def add_user_interests():
 
         # 입력 데이터 검증
         if not new_interests:
+            logger.warning('관심분야 추가 실패: interests가 비어있습니다.', extra={'user_id': user.user_id, 'username': user.username})
             return jsonify({'error': 'interests는 비어있을 수 없습니다.'}), 400
         if not isinstance(new_interests, list):
+            logger.warning('관심분야 추가 실패: interests가 리스트가 아닙니다.', extra={'user_id': user.user_id, 'username': user.username})
             return jsonify({'error': 'interests는 리스트여야 합니다.'}), 400
 
         # 기존 관심분야 삭제
@@ -328,6 +387,7 @@ def add_user_interests():
         for interest_id in new_interests:
             interest = Interest.query.get(interest_id)
             if not interest:
+                logger.warning('관심분야 추가 실패: 유효하지 않은 interest_id.', extra={'interest_id': interest_id, 'user_id': user.user_id, 'username': user.username})
                 return jsonify({'error': f'interests_id {interest_id}가 존재하지 않습니다.'}), 404
 
             # 관심분야 추가
@@ -335,10 +395,12 @@ def add_user_interests():
             db.session.add(user_interest)
 
         db.session.commit()
+        logger.info('관심분야 추가 성공', extra={'user_id': user.user_id, 'username': user.username})
         return jsonify({'message': '관심분야가 업데이트되었습니다!'}), 201
 
     except Exception as e:
         db.session.rollback()
+        logger.error(f'관심분야 추가 중 오류 발생: {e}', extra={'user_id': user.user_id, 'username': user.username})
         return jsonify({'error': str(e)}), 500
 
 
@@ -351,13 +413,16 @@ def delete_user_interest(interest_id):
 
         user_interest = UserInterest.query.filter_by(user_id=user.user_id, interests_id=interest_id).first()
         if not user_interest:
+            logger.warning('관심분야 삭제 실패: 해당 관심분야가 존재하지 않습니다.', extra={'interest_id': interest_id, 'user_id': user.user_id, 'username': user.username})
             return jsonify({'error': '해당 관심분야가 존재하지 않습니다.'}), 404
 
         db.session.delete(user_interest)
         db.session.commit()
+        logger.info('관심분야 삭제 성공', extra={'interest_id': interest_id, 'user_id': user.user_id, 'username': user.username})
         return jsonify({'message': '관심분야가 삭제되었습니다.'}), 200
     except Exception as e:
         db.session.rollback()
+        logger.error(f'관심분야 삭제 중 오류 발생: {e}', extra={'interest_id': interest_id, 'user_id': user.user_id, 'username': user.username})
         return jsonify({'error': str(e)}), 500
 
 # 회원 탈퇴 API
@@ -377,9 +442,12 @@ def delete_current_user():
         # 응답 생성 및 쿠키 삭제
         response = jsonify({'message': '회원 탈퇴가 완료되었습니다.'})
         response.set_cookie('token', '', expires=0)  # 토큰 쿠키 제거
+
+        logger.info('회원 탈퇴 성공', extra={'user_id': user.user_id, 'username': user.username})
         return response, 200
     except Exception as e:
         db.session.rollback()
+        logger.error(f'회원 탈퇴 중 오류 발생: {e}', extra={'user_id': user.user_id, 'username': user.username})
         return jsonify({'error': str(e)}), 500
 
 

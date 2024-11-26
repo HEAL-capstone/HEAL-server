@@ -6,3 +6,4 @@ Flask-CORS
 Flask-Bcrypt
 PyJWT
 Flask-Migrate
+logstash-formatter
