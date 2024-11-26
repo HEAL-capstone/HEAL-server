@@ -61,7 +61,7 @@ logger.addHandler(stream_handler)
 # logstash_host = app.config.get('LOGSTASH_HOST', 'logstash')
 # logstash_port = int(app.config.get('LOGSTASH_PORT', 5044))
 
-logstash_host = 'localhost'  # 또는 Logstash 서버의 IP 주소
+logstash_host = 'logstash'  # 또는 Logstash 서버의 IP 주소
 logstash_port = 5044
 
 try:
