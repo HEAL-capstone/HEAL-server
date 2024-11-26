@@ -52,6 +52,7 @@ services:
   logstash:
     image: docker.elastic.co/logstash/logstash:8.8.2
     container_name: logstash
+    user: root
     ports:
       - "5044:5044"  # Logstash Beats input
       - "9600:9600"  # Monitoring API
@@ -62,6 +63,11 @@ services:
     depends_on:
       - elasticsearch
     mem_limit: 1g
+    entrypoint: >
+      /bin/bash -c "
+      apt-get update &&
+      apt-get install -y net-tools curl iputils-ping &&
+      logstash"
 
   kibana:
     image: docker.elastic.co/kibana/kibana:8.8.2
